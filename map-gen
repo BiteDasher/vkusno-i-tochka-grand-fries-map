@@ -1,0 +1,76 @@
+#!/bin/bash
+TMPDIR="${TMPDIR:-/tmp}"
+BEBRA=".$RANDOM-vkusochka"
+
+### Replace the 3 lines below with your coordinates
+# Center of Moscow
+longitude=37.618423
+latitude=55.751244
+city="Москва"
+
+cleanup() {
+	local p=()
+	kill -9 $(jobs -p) &>/dev/null
+	rm -f "$TMPDIR/$BEBRA-"{list,list-formatted}
+	for i in $(seq 1 $count); do
+		p+=("$TMPDIR/$BEBRA-result-$i")
+		p+=("$TMPDIR/$BEBRA-result-yandex-$i")
+		p+=("$TMPDIR/$BEBRA-result-google-$i")
+	done
+	rm -f "${p[@]}"
+}
+trap cleanup EXIT
+
+echo "Получаю список рестиков..."
+curl -sX GET "https://vkusnoitochka.ru/api/restaurants/near?long=${longitude}&lat=${latitude}" > "$TMPDIR/$BEBRA-list"
+echo "Форматирую это дело..."
+jq -r ".[] | select(.city == \"$city\") | \"\(.street) \(.house)@\(.latitude)@\(.longitude)@\(.xmlId)\"" < "$TMPDIR/$BEBRA-list" > "$TMPDIR/$BEBRA-list-formatted"
+
+count=0
+max_threads=8
+
+echo "Начинаю дудос..."
+while read -r line; do
+	((count++))
+	(
+	address="${line%%@*}"
+	############################
+	lat="${line#*@}"
+	lat="${lat%%@*}"
+	############################
+	long="${line#*@}"
+	long="${long#*@}"
+	long="${long%%@*}"
+	############################
+	id="${line##*@}"
+
+	if curl -sX GET "https://vkusnoitochka.ru/api/menu/restaurant/$id" | jq -r '.products[].name' | grep -qx "Гранд Фри"; then
+		echo -e "✅ $address"
+		echo "$address" > "$TMPDIR/$BEBRA-result-$count"
+		echo "$lat;$long;Вкус Очка;$address;$count" > "$TMPDIR/$BEBRA-result-yandex-$count"
+		echo "POINT ($long $lat),\"Вкус Очка\",\"$address\"" > "$TMPDIR/$BEBRA-result-google-$count"
+	else
+		echo -e "❌ $address"
+		: > "$TMPDIR/$BEBRA-result-$count"
+		: > "$TMPDIR/$BEBRA-result-yandex-$count"
+		: > "$TMPDIR/$BEBRA-result-google-$count"
+	fi
+	) &
+	if (( $(jobs -p | wc -l) >= max_threads )); then
+		wait -n
+ 	fi
+done < "$TMPDIR/$BEBRA-list-formatted"
+
+wait
+
+_RANDOM=$RANDOM
+echo '"Широта";"Долгота";"Описание";"Подпись";"Номер метки"' > ./map-yandex-$_RANDOM.csv
+echo 'WKT,name,description'                                  > ./map-google-$_RANDOM.csv
+for x in $(seq 1 $count); do
+	cat "$TMPDIR/$BEBRA-result-$x"        >> ./vkusochka-$_RANDOM.txt
+	cat "$TMPDIR/$BEBRA-result-yandex-$x" >> ./map-yandex-$_RANDOM.csv
+	cat "$TMPDIR/$BEBRA-result-google-$x" >> ./map-google-$_RANDOM.csv
+done
+
+# Import map-yandex.csv on https://yandex.ru/map-constructor
+# Import map-google.csv on https://www.google.com/maps/d/ (google.com/mymaps)
